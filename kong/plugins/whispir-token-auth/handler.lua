@@ -4,7 +4,6 @@ local cjson = require "cjson.safe"
 
 local BasePlugin = require "kong.plugins.base_plugin"
 local responses = require "kong.tools.responses"
-local cache = require "kong.tools.database_cache"
 
 local TokenAuthHandler = BasePlugin:extend()
 
@@ -43,41 +42,41 @@ end
 -- @return err
 local function query_and_validate_token(token, conf)
   ngx.log(ngx.DEBUG, "get token info from: ", conf.auth_server_url)
-  local response_body = {}
-  local res, code, response_headers = http.request{
-    url = conf.auth_server_url,
-    method = "GET",
-    headers = {
-      ["Authorization"] = "bearer " .. token
-    },
-    sink = ltn12.sink.table(response_body),
-  }
+--  local response_body = {}
+--  local res, code, response_headers = http.request{
+--    url = conf.auth_server_url,
+--    method = "GET",
+--    headers = {
+--      ["Authorization"] = "bearer " .. token
+--    },
+--    sink = ltn12.sink.table(response_body),
+--  }
   
-  if type(response_body) ~= "table" then
-    return nil, "Unexpected response"
-  end
-  local resp = table.concat(response_body)
-  ngx.log(ngx.DEBUG, "response body: ", resp)
+--  if type(response_body) ~= "table" then
+--    return nil, "Unexpected response"
+--  end
+--  local resp = table.concat(response_body)
+--  ngx.log(ngx.DEBUG, "response body: ", resp)
   
-  if code ~= 200 then
-    return nil, resp
-  end
-  
+--  if code ~= 200 then
+--    return nil, resp
+--  end
+  local resp = "{\"exp\":1493370065,\"nbf\":1493366465,\"iat\":1493366465,\"client_id\":\"5J-b0tMrTFS3AxLnrCfH5A\"}"
   local decoded, err = cjson.decode(resp)
   if err then
     ngx.log(ngx.ERR, "failed to decode response body: ", err)
     return nil, err
   end
   
-  if not decoded.expires_in then
+  if not decoded.exp then
     return nil, decoded.error or resp
   end
   
-  if decoded.expires_in <= 0 then
+  if decoded.exp <= 0 then
     return nil, EXPIRES_ERR
   end
   
-  decoded.expires_at = decoded.expires_in + os.time()
+  decoded.expires_at = decoded.exp + os.time()
   return decoded
 end
 
@@ -89,6 +88,7 @@ function TokenAuthHandler:access(conf)
   TokenAuthHandler.super.access(self)
   
   local token, err = extract_token(ngx.req)
+  
   if err then
     ngx.log(ngx.ERR, "failed to extract token: ", err)
     return responses.send_HTTP_INTERNAL_SERVER_ERROR(err)
@@ -106,8 +106,18 @@ function TokenAuthHandler:access(conf)
     return responses.send(401, "Unrecognized token")
   end
   
-  local info
-  info, err = cache.get_or_set(KEY_PREFIX .. ":" .. token, 3600, query_and_validate_token, token, conf)
+--  local info
+--  info, err = cache.get_or_set(KEY_PREFIX .. ":" .. token, 3600, query_and_validate_token, token, conf)
+
+local singletons = require "kong.singletons"
+
+local cache_key = singletons.dao.oauth2_credentials:cache_key(KEY_PREFIX .. ":" .. token)
+
+ngx.log(ngx.DEBUG, "cache_key: ", cache_key)
+
+ngx.log(ngx.DEBUG, "KEY_PREFIX token: ", KEY_PREFIX .. ":" .. token)
+
+local info, err = singletons.cache:get(cache_key, nil, query_and_validate_token, token, conf)
   
   if err then
     ngx.log(ngx.ERR, "failed to validate token: ", err)
@@ -116,6 +126,7 @@ function TokenAuthHandler:access(conf)
     end
     return responses.send_HTTP_INTERNAL_SERVER_ERROR(err)
   end
+
   
   if info.expires_at < os.time() then
     return responses.send(401, EXPIRES_ERR)
